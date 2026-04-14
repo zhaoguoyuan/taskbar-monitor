@@ -20,3 +20,21 @@ The reason for this is that this tool registers itself for all users, so the dll
 
 ## Uninstall
 To uninstall it, just use the uninstaller from the "Add or Remove Programs" list.
+
+## Manual DLL replacement (hotfix)
+
+When applying a rebuilt `TaskbarMonitor.dll` without re-running the installer, copy both the new `TaskbarMonitor.dll` and its matching `Newtonsoft.Json.dll` together. The app has no `bindingRedirect`, so a Newtonsoft version mismatch causes `FileLoadException` at startup.
+
+1. Exit taskbar-monitor from the tray icon (or kill `TaskbarMonitorWindows11.exe`).
+2. In an **Administrator PowerShell**:
+
+   ```powershell
+   $src = 'C:\path\to\repo\TaskbarMonitor\bin\Release'
+   $dst = 'C:\Program Files\TaskbarMonitor'
+   Copy-Item "$dst\TaskbarMonitor.dll"   "$dst\TaskbarMonitor.dll.bak"   -Force
+   Copy-Item "$dst\Newtonsoft.Json.dll"  "$dst\Newtonsoft.Json.dll.bak"  -Force
+   Copy-Item "$src\TaskbarMonitor.dll"   "$dst\TaskbarMonitor.dll"       -Force
+   Copy-Item "$src\Newtonsoft.Json.dll"  "$dst\Newtonsoft.Json.dll"      -Force
+   ```
+
+3. Restart taskbar-monitor. If it fails to start, restore the `.bak` files.
