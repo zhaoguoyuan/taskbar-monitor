@@ -383,11 +383,11 @@ namespace TaskbarMonitor
         }
 
         private void DestroyCallback(IntPtr winEventHookHandle, AccessibleEvents accEvent, IntPtr windowHandle, int objectId, int childId, uint eventThreadId, uint eventTimeInMilliseconds)
-        {            
+        {
             if (accEvent == AccessibleEvents.Destroy)
             {
-                
-                var taskbar = TaskbarList.Where(x => x.TargetWnd.ToInt32() == windowHandle.ToInt32()).SingleOrDefault();
+                if (windowHandle == IntPtr.Zero) return;
+                var taskbar = TaskbarList.FirstOrDefault(x => x.TargetWnd == windowHandle);
                 if(taskbar != null)
                 {
                     bool waitForit = taskbar.IsMainTaskbar;
@@ -412,7 +412,8 @@ namespace TaskbarMonitor
         {
             if (accEvent == AccessibleEvents.LocationChange)
             {
-                var taskbar = TaskbarList.Where(x => x.TrayWnd.ToInt32() == windowHandle.ToInt32()).SingleOrDefault();
+                if (windowHandle == IntPtr.Zero) return;
+                var taskbar = TaskbarList.FirstOrDefault(x => x.TrayWnd == windowHandle);
                 if (taskbar != null)
                 {
                     UpdatePosition(taskbar);
