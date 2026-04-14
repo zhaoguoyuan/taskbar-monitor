@@ -109,3 +109,4 @@ bower_components
 *.pfx
 build/
 /TaskbarMonitorInstaller/Resources
+.claude/settings.local.json
