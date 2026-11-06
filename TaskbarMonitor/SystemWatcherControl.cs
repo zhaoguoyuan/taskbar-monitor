@@ -121,6 +121,7 @@ namespace TaskbarMonitor
         {
             if(Monitor != null)
                 Monitor.OnMonitorUpdated -= Monitor_OnMonitorUpdated;
+            DisposeTopProcesses();
             if(BLL.WindowsInformation.IsWindows11())
                 StopMousePolling();
         }
@@ -299,6 +300,8 @@ namespace TaskbarMonitor
             AdjustControlSize();
             if (BLL.WindowsInformation.IsWindows11())
                 StartMousePolling();
+            if (!PreviewMode)
+                TaskManagerLauncher.RecoverIfNeeded();
             //BLL.Win32Api.SetWindowPos(this.Handle, new IntPtr(0), this.Left, this.Top, this.Width, this.Height, 0);
 
         }
@@ -696,6 +699,7 @@ namespace TaskbarMonitor
         private void SystemWatcherControl_MouseEnter(object sender, EventArgs e)
         {
             mouseOver = true;
+            StartHoverTracking();
 
             this.Invalidate();
         }
@@ -705,6 +709,182 @@ namespace TaskbarMonitor
             mouseOver = false;
             this.Invalidate();
         }
+
+        #region Top process popup
+        private const int TopProcessCount = 10;
+        private const int HoverDelayMs = 300;
+        private const int SampleIntervalMs = 1000;
+
+        private System.Windows.Forms.Timer hoverTimer;
+        private System.Threading.Timer sampleTimer;
+        private Counters.ProcessSampler sampler;
+        private TopProcessPopup popup;
+        private string hoverCandidate = null;
+        private DateTime hoverCandidateSince;
+        private volatile string popupCounter = null;
+        private bool popupSuppressed = false;
+        private int sampling = 0;
+
+        // Same layout as OnPaint: one segment per enabled counter
+        private List<KeyValuePair<string, Rectangle>> GetCounterSegments()
+        {
+            var result = new List<KeyValuePair<string, Rectangle>>();
+            if (Options == null || Monitor?.Counters == null) return result;
+            int maximumHeight = VerticalTaskbarMode ? 30 : this.Height;
+            int x = 0, y = 0;
+            foreach (var pair in Options.CounterOptions.Where(c => c.Value.Enabled == true).OrderBy(c => c.Value.Order))
+            {
+                if (!Monitor.Counters.Any(c => c.GetName() == pair.Key)) continue;
+                result.Add(new KeyValuePair<string, Rectangle>(pair.Key, new Rectangle(x, y, Options.HistorySize + 10, maximumHeight)));
+                x += Options.HistorySize + 10;
+                if (VerticalTaskbarMode && x >= this.Size.Width)
+                {
+                    x = 0;
+                    y += maximumHeight + 10;
+                }
+            }
+            return result;
+        }
+
+        private void StartHoverTracking()
+        {
+            if (PreviewMode || Monitor == null) return;
+            if (hoverTimer == null)
+            {
+                hoverTimer = new System.Windows.Forms.Timer();
+                hoverTimer.Interval = 100;
+                hoverTimer.Tick += HoverTimer_Tick;
+            }
+            if (!hoverTimer.Enabled)
+            {
+                hoverCandidate = null;
+                hoverTimer.Start();
+            }
+        }
+
+        private void HoverTimer_Tick(object sender, EventArgs e)
+        {
+            if (this.Disposing || this.IsDisposed) return;
+            var cursor = Cursor.Position;
+            if (!this.RectangleToScreen(this.ClientRectangle).Contains(cursor))
+            {
+                hoverTimer.Stop();
+                popupSuppressed = false;
+                HideTopProcesses();
+                return;
+            }
+            if (popupSuppressed) return;
+
+            var local = this.PointToClient(cursor);
+            var segment = GetCounterSegments().FirstOrDefault(s => s.Value.Contains(local));
+            string name = segment.Key;
+            if (name != null && !Counters.ProcessSampler.MetricFor(name).HasValue)
+                name = null;
+
+            if (name != hoverCandidate)
+            {
+                bool wasShowing = popupCounter != null;
+                hoverCandidate = name;
+                hoverCandidateSince = DateTime.Now;
+                if (name == null)
+                    HideTopProcesses();
+                else if (wasShowing)
+                    ShowTopProcesses(name, segment.Value); // moving between counters: switch immediately
+                return;
+            }
+            if (name != null && popupCounter == null && (DateTime.Now - hoverCandidateSince).TotalMilliseconds >= HoverDelayMs)
+                ShowTopProcesses(name, segment.Value);
+        }
+
+        private void ShowTopProcesses(string counterName, Rectangle segment)
+        {
+            var metric = Counters.ProcessSampler.MetricFor(counterName);
+            if (!metric.HasValue) return;
+            if (popup == null || popup.IsDisposed)
+                popup = new TopProcessPopup { RowCount = TopProcessCount };
+            if (sampler == null)
+                sampler = new Counters.ProcessSampler();
+
+            // keep the previous snapshot when switching between counters so rates show right away
+            if (popupCounter == null)
+                sampler.Reset();
+
+            var label = Monitor.Counters.FirstOrDefault(c => c.GetName() == counterName)?.GetLabel() ?? counterName;
+            popup.SetDark(defaultTheme == null || defaultTheme.TextColor.GetBrightness() > 0.5f);
+            popup.SetContent(label, metric.Value, null);
+            popup.ShowAt(this.RectangleToScreen(segment));
+            popupCounter = counterName;
+
+            if (sampleTimer == null)
+                sampleTimer = new System.Threading.Timer(SampleTimer_Callback, null, 0, SampleIntervalMs);
+            else
+                sampleTimer.Change(0, SampleIntervalMs);
+        }
+
+        private void HideTopProcesses()
+        {
+            popupCounter = null;
+            sampleTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+            if (popup != null && !popup.IsDisposed && popup.Visible)
+                popup.Hide();
+        }
+
+        // runs on a thread-pool thread so the taskbar UI never waits for the process scan
+        private void SampleTimer_Callback(object state)
+        {
+            if (Interlocked.Exchange(ref sampling, 1) == 1) return;
+            try
+            {
+                string name = popupCounter;
+                var s = sampler;
+                if (name == null || s == null) return;
+                var metric = Counters.ProcessSampler.MetricFor(name);
+                if (!metric.HasValue) return;
+
+                var entries = s.Sample(metric.Value, TopProcessCount);
+                if (entries == null) return; // still measuring
+
+                if (this.IsDisposed || !this.IsHandleCreated) return;
+                this.BeginInvoke((Action)(() =>
+                {
+                    if (popupCounter != name || popup == null || popup.IsDisposed || !popup.Visible) return;
+                    var label = Monitor.Counters.FirstOrDefault(c => c.GetName() == name)?.GetLabel() ?? name;
+                    popup.SetContent(label, metric.Value, entries);
+                }));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref sampling, 0);
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            // hide while clicking / showing the context menu
+            popupSuppressed = true;
+            HideTopProcesses();
+            base.OnMouseDown(e);
+        }
+
+        private void DisposeTopProcesses()
+        {
+            hoverTimer?.Stop();
+            hoverTimer?.Dispose();
+            hoverTimer = null;
+            popupCounter = null;
+            sampleTimer?.Dispose();
+            sampleTimer = null;
+            sampler?.Dispose();
+            sampler = null;
+            if (popup != null && !popup.IsDisposed)
+                popup.Dispose();
+            popup = null;
+        }
+        #endregion
         private System.Windows.Forms.Timer mousePollTimer;
         private bool lastMouseOver = false;
 
@@ -785,9 +965,23 @@ namespace TaskbarMonitor
         private void SystemWatcherControl_DoubleClick(object sender, EventArgs e)
         {
 #if(DEBUG)
-            SHOW_DEBUG = !SHOW_DEBUG;
-            this.Invalidate();
+            if ((Control.ModifierKeys & Keys.Control) == Keys.Control)
+            {
+                SHOW_DEBUG = !SHOW_DEBUG;
+                this.Invalidate();
+                return;
+            }
 #endif
+            if (PreviewMode) return;
+            HideTopProcesses();
+            try
+            {
+                TaskManagerLauncher.OpenPerformance();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
         }
         protected override void OnNotifyMessage(Message m)
         {

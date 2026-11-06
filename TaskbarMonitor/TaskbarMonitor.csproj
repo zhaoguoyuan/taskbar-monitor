@@ -74,6 +74,10 @@
     <Compile Include="Counters\CounterCPU.cs" />
     <Compile Include="Counters\ICounter.cs" />
     <Compile Include="Counters\PerformanceCounterReader.cs" />
+    <Compile Include="Counters\ProcessSampler.cs" />
+    <Compile Include="TopProcessPopup.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="CSDeskBand.cs" />
     <Compile Include="DeskBand.cs" />
     <Compile Include="GithubUpdater.cs" />
@@ -98,6 +102,7 @@
       <DependentUpon>ScreenPositioning.cs</DependentUpon>
     </Compile>
     <Compile Include="TaskbarManager.cs" />
+    <Compile Include="TaskManagerLauncher.cs" />
     <Compile Include="SystemWatcherControl.cs">
       <SubType>UserControl</SubType>
     </Compile>
